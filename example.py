@@ -6,7 +6,7 @@ import flax.linen as nn
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils, pjit
+from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 # esmjax imports
@@ -15,9 +15,6 @@ from esmjax.modules import modules
 
 def convert_params_to_bfloat16(params):
     return jax.tree_util.tree_map(lambda x: jax.device_put(jnp.asarray(x, dtype=jnp.bfloat16), jax.devices("cpu")[0]) if jnp.issubdtype(x.dtype, jnp.floating) else x, params)
-
-def convert_abstract_params_to_bfloat16(params):
-    return jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, dtype=jnp.bfloat16) if jnp.issubdtype(x.dtype, jnp.floating) else x, params)
 
 # MODEL_NAME = "esm2_t6_8M_UR50D"
 # MODEL_NAME = "esm2_t12_35M_UR50D"
@@ -62,7 +59,7 @@ def auto_shard_params(params, mesh):
             return x  # Skip non-JAX types
 
         # Define a heuristic: If dimension is large, partition it across devices
-
+        # generally, shard along the last dimension (output dim)
         pspec = (None,) * (len(x.shape) - 1) + ("X",)
         shard_spec = P(*pspec) if x.shape[-1] >= 1024 and x.shape[-1] % 2 == 0 else P()  # Large tensors get sharded
 
