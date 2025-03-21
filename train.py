@@ -48,7 +48,7 @@ esm = models.ESM2(
     cfg.num_layers
     )
 
-# esm = models.ESM2LM(
+# esm = models.ESM2MLM(
 #     nn.Embed(33, cfg.embed_dim),
 #     functools.partial(
 #         models.EncoderLayer,
@@ -60,6 +60,12 @@ esm = models.ESM2(
 #     )
 
 print(esm)
+
+key = jax.random.PRNGKey(0)
+arr = jnp.array([[0, 1, 2]])
+shapes = jax.eval_shape(esm.init, key, arr)
+
+print(shapes)
 
 esm_params = flax.serialization.msgpack_restore(
     open(f"flax_params/{MODEL_NAME}.bfloat16.msgpack", "rb").read()
