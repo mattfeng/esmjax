@@ -1,8 +1,9 @@
-# General imports
 import numpy as np
+import functools
 
-from flax.core import frozen_dict
+import flax
 import flax.linen as nn
+from flax.core import FrozenDict
 
 import jax
 import jax.numpy as jnp
@@ -10,11 +11,22 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 # esmjax imports
-from esmjax import io, tokenizer as esm_tokenizer
+from esmjax import tokenizer as esm_tokenizer
 from esmjax.modules import models
 
-def convert_params_to_bfloat16(params):
-    return jax.tree_util.tree_map(lambda x: jax.device_put(jnp.asarray(x, dtype=jnp.bfloat16), jax.devices("cpu")[0]) if jnp.issubdtype(x.dtype, jnp.floating) else x, params)
+from collections import namedtuple
+
+
+ModelConfig = namedtuple(
+    "ModelConfig",
+    ["num_layers", "embed_dim", "num_heads"]
+    )
+
+MODEL_CONFIGS = {
+    "esm2_t48_15B_UR50D": ModelConfig(
+        num_layers=48, embed_dim=5120, num_heads=40
+    )
+}
 
 # MODEL_NAME = "esm2_t6_8M_UR50D"
 # MODEL_NAME = "esm2_t12_35M_UR50D"
@@ -23,20 +35,58 @@ def convert_params_to_bfloat16(params):
 # MODEL_NAME = "esm2_t36_3B_UR50D"
 MODEL_NAME = "esm2_t48_15B_UR50D"
 
-# Load in the original PyTorch state; will download if first time.
-state = io.get_torch_state(MODEL_NAME)
+cfg = MODEL_CONFIGS[MODEL_NAME]
 
-print("loaded model into CPU memory")
+esm = models.ESM2(
+    nn.Embed(33, cfg.embed_dim),
+    functools.partial(
+        models.EncoderLayer,
+        cfg.num_heads,
+        cfg.embed_dim,
+        cfg.embed_dim * 4
+        ),
+    cfg.num_layers
+    )
 
-esm = models.get_esm2_model(state["cfg"])
+# esm = models.ESM2LM(
+#     nn.Embed(33, cfg.embed_dim),
+#     functools.partial(
+#         models.EncoderLayer,
+#         cfg.num_heads,
+#         cfg.embed_dim,
+#         cfg.embed_dim * 4
+#         ),
+#     cfg.num_layers
+#     )
+
 print(esm)
-esm_params = io.convert_encoder(state["model"], state["cfg"])
-esm_params = frozen_dict.FrozenDict({"params": esm_params})
-esm_params = convert_params_to_bfloat16(esm_params)
 
-print("converted parameters to bfloat16")
+esm_params = flax.serialization.msgpack_restore(
+    open(f"flax_params/{MODEL_NAME}.bfloat16.msgpack", "rb").read()
+)
+# flax msgpack_restore does not automatically create jax.Arrays
+# instead, it creates numpy arrays, which prevents them
+# from being correctly sharded; therefore, we have to map all
+# parameters to jax.Arrays manually with tree_map
+esm_params = FrozenDict(jax.tree_util.tree_map(functools.partial(jax.device_put, device=jax.devices("cpu")[0]), esm_params))
 
-print("param memory usage:", sum(arr.nbytes for arr in jax.tree_util.tree_leaves(esm_params)))
+def human_readable_bytes(num_bytes):
+    if num_bytes < 0:
+        raise ValueError("num_bytes must be non-negative")
+
+    # Define the unit steps
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+
+    # Iteratively reduce the number until it fits in the current unit
+    for unit in units:
+        if num_bytes < 1024:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024
+
+    return f"{num_bytes:.2f} YB"
+
+
+print("param memory usage:", human_readable_bytes(sum(arr.nbytes for arr in jax.tree_util.tree_leaves(esm_params))))
 
 # Create 1D GPU mesh
 mesh_shape = (2,)
@@ -46,23 +96,16 @@ print("device_mesh", device_mesh)
 mesh = Mesh(device_mesh, ("X",))
 print("mesh", mesh)
 
-# get shapes
-# key = jax.random.PRNGKey(0)
-# arr = jnp.array([[0, 1, 2]])
-# abstract_params = jax.eval_shape(esm.init, key, arr)
-
-# print(abstract_params)
-
 def auto_shard_params(params, mesh):
     """Automatically shards model parameters based on size & shape."""
     def shard_rule(x):
         if not isinstance(x, jnp.ndarray):
+            if isinstance(x, np.ndarray):
+                raise ValueError("np.ndarrays found in parameters PyTree. They will not be sharded!")
             return x  # Skip non-JAX types
 
         # Define a heuristic: If dimension is large, partition it across devices
-        # generally, shard along the last dimension (output dim)
-        pspec = (None,) * (len(x.shape) - 1) + ("X",)
-        shard_spec = P(*pspec) if x.shape[-1] >= 1024 and x.shape[-1] % 2 == 0 else P()  # Large tensors get sharded
+        shard_spec = P("X") if x.shape[0] >= 1024 and x.shape[0] % 2 == 0 else P()  # Large tensors get sharded
 
         # Apply NamedSharding
         return jax.device_put(x, NamedSharding(mesh, shard_spec))
@@ -70,9 +113,11 @@ def auto_shard_params(params, mesh):
     # Apply sharding rules recursively to all parameters
     return jax.tree_util.tree_map(shard_rule, params)
 
+print("sharding parameters")
+
 esm_params = auto_shard_params(esm_params, mesh)
 
-print(esm_params)
+print("parameters sharded")
 
 # Step 1. Tokenize input protein
 

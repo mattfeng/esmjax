@@ -6,7 +6,7 @@ import jax
 
 # esmjax imports
 from esmjax import io, tokenizer as esm_tokenizer
-from esmjax.modules import modules
+from esmjax.modules import models
 
 # Imports specifically for multi-device sharding
 from esmjax.modules import partitioning
@@ -18,7 +18,7 @@ MODEL_NAME = "esm2_t48_15B_UR50D"
 # Load in the original PyTorch state; will download if first time.
 state = io.get_torch_state(MODEL_NAME)
 
-esm, params_axes = modules.get_esm2_model(state["cfg"])
+esm, params_axes = models.get_esm2_model(state["cfg"])
 esm_params = io.convert_encoder(state["model"], state["cfg"])
 esm_params = frozen_dict.FrozenDict({"params": esm_params})
 

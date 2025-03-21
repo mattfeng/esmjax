@@ -9,6 +9,8 @@ sync:
         - "mutagen.yml.lock"
         - "logs/"
         - "wandb/"
+        - "*.pkl"
+        - "*.msgpack"
 
   engaging:
     alpha: .
