@@ -1,20 +1,20 @@
-import numpy as np
+#!/usr/bin/env python3
 import functools
+from collections import namedtuple
 
-import flax
-import flax.linen as nn
-from flax.core import FrozenDict
+import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-# esmjax imports
+import flax
+import flax.linen as nn
+from flax.core import FrozenDict
+
 from esmjax import tokenizer as esm_tokenizer
 from esmjax.modules import models
-
-from collections import namedtuple
 
 
 ModelConfig = namedtuple(
@@ -23,19 +23,25 @@ ModelConfig = namedtuple(
     )
 
 MODEL_CONFIGS = {
+    "esm2_t6_8M_UR50D": ModelConfig(
+        ),
+    "esm2_t12_35M_UR50D": ModelConfig(
+        ),
+    "esm2_t30_150M_UR50D": ModelConfig(
+        ),
+    "esm2_t33_650M_UR50D": ModelConfig(
+        ),
+    "esm2_t36_3B_UR50D": ModelConfig(
+        ),
     "esm2_t48_15B_UR50D": ModelConfig(
         num_layers=48, embed_dim=5120, num_heads=40
-    )
+        ),
 }
 
-# MODEL_NAME = "esm2_t6_8M_UR50D"
-# MODEL_NAME = "esm2_t12_35M_UR50D"
-# MODEL_NAME = "esm2_t30_150M_UR50D"
-# MODEL_NAME = "esm2_t33_650M_UR50D"
-# MODEL_NAME = "esm2_t36_3B_UR50D"
-MODEL_NAME = "esm2_t48_15B_UR50D"
+def main(model_name):
 
-cfg = MODEL_CONFIGS[MODEL_NAME]
+
+    cfg = MODEL_CONFIGS[model_name]
 
 esm = models.ESM2(
     nn.Embed(33, cfg.embed_dim),
@@ -121,24 +127,12 @@ print("parameters sharded")
 
 # Step 1. Tokenize input protein
 
-p53_seq = "MEEPQSDPSVEPPLSQETFSDLWKLLPENNVLSPLPSQAMDDLMLSPDDIEQWFTEDPGP\
-    DEAPRMPEAAPPVAPAPAAPTPAAPAPAPSWPLSSSVPSQKTYQGSYGFRLGFLHSGTAK\
-    SVTCTYSPALNKMFCQLAKTCPVQLWVDSTPPPGTRVRAMAIYKQSQHMTEVVRRCPHHE\
-    RCSDSDGLAPPQHLIRVEGNLRVEYLDDRNTFRHSVVVPYEPPEVGSDCTTIHYNYMCNS\
-    SCMGGMNRRPILTIITLEDSSGNLLGRNSFEVRVCACPGRDRRTEEENLRKKGEPHHELP\
-    PGSTKRALPNNTSSSPQPKKKPLDGEYFTLQIRGRERFEMFRELNEALELKDAQAGKEPG\
-    GSRAHSSHLKSKKGQSTSRHKKLMFKTEGPDSD"
+def process_samples(apply_fn, seqs):
+    tokenizer = esm_tokenizer.protein_tokenizer(pad_to_multiple_of=128)
+    tokens = [x.ids for x in tokenizer.encode_batch(seqs)]
+    batch = np.array(tokens)
 
-insulin_seq = "MALWMRLLPLLALLALWGPDPAAAFVNQHLCGSHLVEALYLVCGERGFFYTPKTRREAED\
-    LQVGQVELGGGPGAGSLQPLALEGSLQKRGIVEQCCTSICSLYQLENYCN"
-
-random_seq = "MALWMRLLPLLALLALWGPDPAAAFVNQHLCGSHLVEALYLVCGERGFFYTPKTRREAED"
-
-tokenizer = esm_tokenizer.protein_tokenizer(pad_to_multiple_of=128)
-tokens = [x.ids for x in tokenizer.encode_batch([p53_seq, insulin_seq,random_seq])]
-batch = np.array(tokens)
-
-print("Generated batch")
+    embeds = apply_fn(esm_params)
 
 # Step 2. Get embeddings
 
@@ -150,3 +144,12 @@ embeds = apply_fn(esm_params, batch)
 
 print(embeds)
 print(embeds.shape)
+
+
+
+def train():
+    pass
+
+
+def train_step():
+    pass
