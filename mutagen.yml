@@ -11,6 +11,8 @@ sync:
         - "wandb/"
         - "*.pkl"
         - "*.msgpack"
+        - "*.h5"
+        - "data/"
 
   engaging:
     alpha: .
