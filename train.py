@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import functools
 from collections import namedtuple
+from typing import Tuple
 
 import numpy as np
 
@@ -12,9 +13,15 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import flax
 import flax.linen as nn
 from flax.core import FrozenDict
+from flax.training import train_state
+
+import optax
 
 from esmjax import tokenizer as esm_tokenizer
 from esmjax.modules import models
+from esmjax.data import ESM2MaskedResidueDataset
+
+from torch.utils.data import DataLoader
 
 
 ModelConfig = namedtuple(
@@ -74,68 +81,31 @@ def auto_shard_params(params, mesh):
         return jax.device_put(x, NamedSharding(mesh, shard_spec))
 
     # Apply sharding rules recursively to all parameters
-    return jax.tree_util.tree_map(shard_rule, params)
+    print("Sharding parameters...")
+    sharded_params = jax.tree_util.tree_map(shard_rule, params)
+    print("Parameters sharded.")
+
+    return sharded_params
 
 
-def process_samples(apply_fn, esm_params, seqs):
-    tokenizer = esm_tokenizer.protein_tokenizer(
-        pad_to_multiple_of=128
-        )
-    tokens = [x.ids for x in tokenizer.encode_batch(seqs)]
-    batch = np.array(tokens)
+def get_1d_gpu_mesh():
+    """Create 1D GPU mesh."""
 
-    embeds = apply_fn(esm_params, batch)
+    mesh_shape = (jax.local_device_count(),)
+    device_mesh = mesh_utils.create_device_mesh(mesh_shape)
+    mesh = Mesh(device_mesh, ("X",))
 
-    return embeds
+    return mesh
 
 
-def train():
-    pass
+def load_pretrained_params(params_file):
+    """Load pretrained parameters.
 
-
-def train_step(masked_ids, ids, special_tokens_mask):
-    masked_ids = jnp.array(masked_ids, dtype=int)
-    ids = jnp.array(ids, dtype=int)
-    special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
-
-    pass
-
-
-def main(*, model_name):
-    cfg = MODEL_CONFIGS[model_name]
-
-    # esm = models.ESM2(
-    #     nn.Embed(33, cfg.embed_dim),
-    #     functools.partial(
-    #         models.EncoderLayer,
-    #         cfg.num_heads,
-    #         cfg.embed_dim,
-    #         cfg.embed_dim * 4
-    #         ),
-    #     cfg.num_layers
-    #     )
-
-    esm = models.ESM2MLM(
-        nn.Embed(33, cfg.embed_dim),
-        functools.partial(
-            models.EncoderLayer,
-            cfg.num_heads,
-            cfg.embed_dim,
-            cfg.embed_dim * 4
-            ),
-        cfg.num_layers
-        )
-    print(esm)
-
-    # get shapes (just informative; not needed)
-    key = jax.random.PRNGKey(0)
-    arr = jnp.array([[0, 1, 2]])
-    shapes = jax.eval_shape(esm.init, key, arr)
-
-    print(shapes)
+    flax_params/{model_name}.bfloat16.msgpack
+    """
 
     esm_params = flax.serialization.msgpack_restore(
-        open(f"flax_params/{model_name}.bfloat16.msgpack", "rb").read()
+        open(params_file, "rb").read()
     )
 
     # flax msgpack_restore does not automatically create jax.Arrays
@@ -146,31 +116,194 @@ def main(*, model_name):
 
     print("param memory usage:", human_readable_bytes(sum(arr.nbytes for arr in jax.tree_util.tree_leaves(esm_params))))
 
-    # Create 1D GPU mesh
-    mesh_shape = (jax.local_device_count(),)
-    device_mesh = mesh_utils.create_device_mesh(mesh_shape)
-    print("device_mesh", device_mesh)
+    return esm_params
 
-    mesh = Mesh(device_mesh, ("X",))
-    print("mesh", mesh)
 
-    print("sharding parameters")
-    esm_params = auto_shard_params(esm_params, mesh)
-    print("parameters sharded")
+def cycle(dataloader: DataLoader):
+    while True:
+        for batch in dataloader:
+            yield batch
 
-    apply_fn = jax.jit(esm.apply)
 
-    p53 = "MEEPQSDPSVEPPLSQETFSDLWKLLPENNVLSPLPSQAMDDLMLSPDDIEQWFTEDPGPDEAPRMPEAAPPVAPAPAAPTPAAPAPAPSWPLSSSVPSQKTYQGSYGFRLGFLHSGTAKSVTCTYSPALNKMFCQLAKTCPVQLWVDSTPPPGTRVRAMAIYKQSQHMTEVVRRCPHHERCSDSDGLAPPQHLIRVEGNLRVEYLDDRNTFRHSVVVPYEPPEVGSDCTTIHYNYMCNSSCMGGMNRRPILTIITLEDSSGNLLGRNSFEVRVCACPGRDRRTEEENLRKKGEPHHELPPGSTKRALPNNTSSSPQPKKKPLDGEYFTLQIRGRERFEMFRELNEALELKDAQAGKEPGGSRAHSSHLKSKKGQSTSRHKKLMFKTEGPDSD"
+def create_train_state(
+    rng: jax.random.PRNGKey,
+    model: nn.Module,
+    learning_rate: float,
+    input_shape: Tuple[int],
+    *,
+    params=None,
+    mesh=None
+):
+    """Create a training state to hold model parameters and the optimizer.
+    """
 
-    sequences = [p53]
+    if params is None:
+        # hack to force initialization of params on CPU
+        cpu_device = jax.devices("cpu")[0]
+        params = jax.jit(model.init, device=cpu_device)(rng, jnp.ones(input_shape, dtype=int))["params"]
 
-    embeds = process_samples(apply_fn, esm_params, sequences)
+    # Convert param dtype to bfloat16
+    # params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16) if isinstance(x, jnp.ndarray) else x, params)
 
-    print(embeds)
-    print(embeds.shape)
+    # move params to desired accelerator
+    # params = jax.tree_util.tree_map(lambda x: jax.device_put(x), params)
+
+    # TODO: autoshard
+    if mesh is not None:
+        params = auto_shard_params(params, mesh)
+
+    tx = optax.adam(learning_rate)
+    state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+    return state
+
+
+def loss_fn(state, params, masked_ids, ids, special_tokens_mask):
+    logits = state.apply_fn({"params": params}, masked_ids)
+    scores = optax.softmax_cross_entropy_with_integer_labels(logits, ids)
+
+    # only tokens with real meaning should contribute to the loss
+    loss = (scores * (1 - special_tokens_mask)).mean()
+
+    return loss
+
+
+@jax.jit
+def train_step(state, masked_ids, ids, special_tokens_mask):
+    loss, grads = jax.value_and_grad(loss_fn, argnums=1)(
+        state,
+        state.params,
+        masked_ids,
+        ids,
+        special_tokens_mask
+    )
+
+    state = state.apply_gradients(grads=grads)
+    return state, loss
+
+
+def train(
+    state: train_state.TrainState,
+    dataloader: DataLoader,
+    *,
+    step_report: int = 100,
+    start_step: int = 0,
+    end_step: int,
+):
+    dataloader_it = iter(cycle(dataloader))
+
+    recent_loss = 0.0
+
+    step = start_step
+    while step < end_step:
+        print(f"\n=== step {step} ===")
+        batch = next(dataloader_it)
+
+        masked_ids = batch["masked_ids"]
+        ids = batch["ids"]
+        special_tokens_mask = batch["special_tokens_mask"]
+
+        masked_ids = jnp.array(masked_ids, dtype=int)
+        ids = jnp.array(ids, dtype=int)
+        special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
+
+        print(masked_ids.device(), ids.device(), special_tokens_mask.device())
+
+        state, loss = train_step(state, masked_ids, ids, special_tokens_mask)
+
+        print(f"step {step}: loss {loss}")
+
+        recent_loss += loss
+        step += 1
+
+        if (step - start_step) % step_report == 0:
+            avg_loss = recent_loss / step_report
+            print(f"Step {step}; Average loss over {step_report} steps: {avg_loss:0.4f}")
+            recent_loss = 0.0
+
+    return state
+
+
+def main(*, model_name):
+    rng = jax.random.PRNGKey(0)
+
+    # SETUP HYPERPARAMETERS
+    # =====================
+
+    input_seq_len = 1024
+    batch_size = 4
+    learning_rate = 1e-3
+
+
+    # SETUP DATASET
+    # =============
+
+    hdf5_file_path = "/home/gridsan/mattfeng/datasets/esm2_pretrain_nemo2_fulldata_v1.0/full_esm2_pretrain.h5"
+
+    dataset = ESM2MaskedResidueDataset(
+        hdf5_file_path,
+        tokenizer=esm_tokenizer.protein_tokenizer(input_seq_len),
+        seed=100
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=False,
+        persistent_workers=True,
+        num_workers=1,
+        collate_fn=dataset.collate_fn
+    )
+
+    # SETUP MODEL
+    # ===========
+
+    cfg = MODEL_CONFIGS[model_name]
+
+    esm = models.ESM2MLM(
+        nn.Embed(dataset.tokenizer.get_vocab_size(), cfg.embed_dim),
+        functools.partial(
+            models.EncoderLayer,
+            cfg.num_heads,
+            cfg.embed_dim,
+            cfg.embed_dim * 4
+            ),
+        cfg.num_layers
+        )
+    print(esm)
+
+    # SETUP TRAINING
+    # ==============
+
+    print("Creating train state...")
+
+    mesh = get_1d_gpu_mesh()
+
+    state = create_train_state(rng, esm, learning_rate, (batch_size, input_seq_len), mesh=None)
+
+    print("Created train state:")
+
+    final_state = train(state, dataloader, end_step=10, step_report=5)
 
 
 if __name__ == "__main__":
+    # main(
+    #     model_name="esm2_t48_15B_UR50D"
+    # )
+
+    # main(
+    #     model_name="esm2_t36_3B_UR50D"
+    # )
+
     main(
-        model_name="esm2_t48_15B_UR50D"
-        )
+        model_name="esm2_t30_150M_UR50D"
+    )
+
+    # main(
+    #     model_name="esm2_t33_650M_UR50D"
+    # )
+
+    # main(
+    #     model_name="esm2_t12_35M_UR50D"
+    # )
