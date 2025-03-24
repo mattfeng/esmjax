@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-import glob
-import os
-import sys
+import tqdm
 import h5py
 
 def merge_hdf5_files(output_file, input_files):
@@ -11,19 +9,38 @@ def merge_hdf5_files(output_file, input_files):
     Merge datasets from multiple HDF5 files into a single output file.
     If duplicate dataset names occur, a suffix based on the input file name is appended.
     """
-    with h5py.File(output_file, 'w') as fout:
+
+    elts_per_group = 10000
+    group_idx = 0
+    idx = 0
+
+    with h5py.File(output_file, "w") as fout:
+        group = fout.create_group(f"{group_idx}")
+
         for infile in input_files:
             print(f"Merging file: {infile}")
-            with h5py.File(infile, 'r') as fin:
-                for key in fin:
-                    # If dataset already exists, append the file's basename (without extension)
-                    if key in fout:
-                        base = os.path.splitext(os.path.basename(infile))[0]
-                        new_key = f"{key}_{base}"
-                        print(f"  Duplicate key '{key}' found. Using '{new_key}'.")
-                        fin.copy(key, fout, name=new_key)
-                    else:
-                        fin.copy(key, fout, name=key)
+            with h5py.File(infile, "r") as fin:
+
+
+                with tqdm.tqdm(total=len(fin) // 2) as pbar:
+                    for key in fin:
+                        # we will add numbered keys later
+                        if not key.startswith("UniRef50"):
+                            continue
+
+                        fin.copy(key, group, name=key)
+
+                        # add hardlink to dataset with index
+                        group[str(idx)] = group[key]
+
+                        pbar.update(1)
+                        idx += 1
+
+                        if len(group) >= elts_per_group:
+                            group_idx += 1
+                            group = fout.create_group(f"{group_idx}")
+                            idx = 0
+
     print(f"Merge complete! Output file: {output_file}")
 
 def main():
@@ -32,22 +49,10 @@ def main():
     )
     parser.add_argument("output", help="Name of the output merged HDF5 file.")
     parser.add_argument("inputs", nargs="+",
-                        help="Input HDF5 file(s) or glob pattern(s).")
+                        help="Input HDF5 file(s).")
     args = parser.parse_args()
 
-    # Expand any glob patterns in the input arguments
-    expanded_files = []
-    for pattern in args.inputs:
-        files = glob.glob(pattern)
-        if not files:
-            print(f"Warning: No files found for pattern '{pattern}'.", file=sys.stderr)
-        expanded_files.extend(files)
-
-    if not expanded_files:
-        print("Error: No input files found. Exiting.", file=sys.stderr)
-        sys.exit(1)
-
-    merge_hdf5_files(args.output, expanded_files)
+    merge_hdf5_files(args.output, args.inputs)
 
 if __name__ == "__main__":
     main()

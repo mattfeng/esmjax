@@ -34,20 +34,19 @@ PROTEINSEQ_TOKS = {
         ".",
         "-",
     ],
-    "prepend_toks": ["<cls>", "<pad>", "<eos>", "<unk>"],
+    "prepend_toks": ["<sos>", "<pad>", "<eos>", "<unk>"],
     "append_toks": ["<null_1>", "<mask>"],
 }
 
 
 def protein_tokenizer(
-    pad_to_multiple_of: Optional[int] = None, max_length: Optional[int] = 1024
+    pad_to_multiple_of: Optional[int] = None
 ) -> tokenizers.Tokenizer:
     """Returns the default protein tokenizer.
 
     Args:
         pad_to_multiple_of (Optional[int]): If specified, pads all sequences to
             nearest (higher) multiple of value. Defaults to None.
-        max_length (Optional[int]): Maximum length to truncate to. Defaults to 1024.
 
     Returns:
         tokenizers.Tokenizer: HuggingFace Tokenizer to tokenize proteins.
@@ -79,19 +78,16 @@ def protein_tokenizer(
     )
 
     # Add template, to add <cls> to start and <eos> to end of all sequences.
-    tokenizer.post_processor = tokenizers.processors.TemplateProcessing(
-        single="<cls> $A <eos>",
-        pair=None,
-        special_tokens=[("<cls>", 0), ("<eos>", 2)],
-    )
+    # tokenizer.post_processor = tokenizers.processors.TemplateProcessing(
+    #     single="<cls> $A <eos>",
+    #     pair=None,
+    #     special_tokens=[("<cls>", 0), ("<eos>", 2)],
+    # )
 
     # If padding is requested, enable padding.
     if pad_to_multiple_of:
         tokenizer.enable_padding(
             pad_id=1, pad_token="<pad>", pad_to_multiple_of=pad_to_multiple_of
         )
-
-    # Enable truncation to specified max length.
-    tokenizer.enable_truncation(max_length=max_length)
 
     return tokenizer

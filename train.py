@@ -93,11 +93,15 @@ def train():
     pass
 
 
-def train_step():
+def train_step(masked_ids, ids, special_tokens_mask):
+    masked_ids = jnp.array(masked_ids, dtype=int)
+    ids = jnp.array(ids, dtype=int)
+    special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
+
     pass
 
 
-def main(model_name):
+def main(*, model_name):
     cfg = MODEL_CONFIGS[model_name]
 
     # esm = models.ESM2(
@@ -143,7 +147,7 @@ def main(model_name):
     print("param memory usage:", human_readable_bytes(sum(arr.nbytes for arr in jax.tree_util.tree_leaves(esm_params))))
 
     # Create 1D GPU mesh
-    mesh_shape = (2,)
+    mesh_shape = (jax.local_device_count(),)
     device_mesh = mesh_utils.create_device_mesh(mesh_shape)
     print("device_mesh", device_mesh)
 
@@ -167,4 +171,6 @@ def main(model_name):
 
 
 if __name__ == "__main__":
-    main("esm2_t48_15B_UR50D")
+    main(
+        model_name="esm2_t48_15B_UR50D"
+        )

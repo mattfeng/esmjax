@@ -51,10 +51,12 @@ def main(frac):
                 ])
                 data = np.array(list(zip(seq_ids, seqs)), dtype=dt)
 
-                dset = fout.create_dataset(cluster_id, data=data)
+                fout.create_dataset(cluster_id, data=data)
 
+                # dset = fout.create_dataset(cluster_id, data=data)
                 # create hard link with index
-                fout[str(idx)] = dset
+                # 2025-03-24: actually, do this when merging fractions; alternatively, make sure there are not too many keys at the root level, it makes HDF5 very slow
+                # fout[str(idx)] = dset
 
                 cursor.close()
 
