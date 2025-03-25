@@ -33,7 +33,7 @@ class ESM2MaskedResidueDataset(Dataset):
         *,
         seed,
         tokenizer: Tokenizer,
-        seq_len=1022 # length of protein sequence
+        seq_len: int
     ):
         self.seed = seed
         self.tokenizer = tokenizer

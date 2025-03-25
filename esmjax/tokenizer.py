@@ -40,7 +40,7 @@ PROTEINSEQ_TOKS = {
 
 
 def protein_tokenizer(
-    pad_to_multiple_of: Optional[int] = None
+    pad_length: int
 ) -> tokenizers.Tokenizer:
     """Returns the default protein tokenizer.
 
@@ -84,10 +84,10 @@ def protein_tokenizer(
     #     special_tokens=[("<cls>", 0), ("<eos>", 2)],
     # )
 
-    # If padding is requested, enable padding.
-    if pad_to_multiple_of:
-        tokenizer.enable_padding(
-            pad_id=1, pad_token="<pad>", pad_to_multiple_of=pad_to_multiple_of
-        )
+    tokenizer.enable_padding(
+        pad_id=1,
+        pad_token="<pad>",
+        length=pad_length
+    )
 
     return tokenizer

@@ -2,6 +2,9 @@
 import functools
 from collections import namedtuple
 from typing import Tuple
+from datetime import timedelta, datetime
+
+import tqdm
 
 import numpy as np
 
@@ -49,6 +52,21 @@ MODEL_CONFIGS = {
         num_layers=48, embed_dim=5120, num_heads=40
         ),
 }
+
+def format_timedelta(td: timedelta) -> str:
+    # Calculate total seconds from the timedelta
+    total_seconds = int(td.total_seconds())
+
+    # Compute days, hours, minutes, and seconds
+    days, remainder = divmod(total_seconds, 86400)  # 86400 seconds in a day
+    hours, remainder = divmod(remainder, 3600)        # 3600 seconds in an hour
+    minutes, seconds = divmod(remainder, 60)          # 60 seconds in a minute
+
+    # Format string depending on whether there are days or not
+    if days > 0:
+        return f"{days}d {hours:02}h:{minutes:02}m:{seconds:02}s"
+    else:
+        return f"{hours:02}h:{minutes:02}m:{seconds:02}s"
 
 
 def human_readable_bytes(num_bytes):
@@ -139,8 +157,9 @@ def create_train_state(
 
     if params is None:
         # hack to force initialization of params on CPU
-        cpu_device = jax.devices("cpu")[0]
-        params = jax.jit(model.init, device=cpu_device)(rng, jnp.ones(input_shape, dtype=int))["params"]
+        # cpu_device = jax.devices("cpu")[0]
+        # params = jax.jit(model.init, device=cpu_device)(rng, jnp.ones(input_shape, dtype=int))["params"]
+        params = model.init(rng, jnp.empty(input_shape, dtype=int))["params"]
 
     # Convert param dtype to bfloat16
     # params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16) if isinstance(x, jnp.ndarray) else x, params)
@@ -195,31 +214,38 @@ def train(
     recent_loss = 0.0
 
     step = start_step
-    while step < end_step:
-        print(f"\n=== step {step} ===")
-        batch = next(dataloader_it)
 
-        masked_ids = batch["masked_ids"]
-        ids = batch["ids"]
-        special_tokens_mask = batch["special_tokens_mask"]
+    with tqdm.tqdm(total=end_step - start_step) as pbar:
+        while step < end_step:
+            pbar.set_description(f"Step {step} of {start_step}->{end_step}")
 
-        masked_ids = jnp.array(masked_ids, dtype=int)
-        ids = jnp.array(ids, dtype=int)
-        special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
+            start_time = datetime.now()
+            batch = next(dataloader_it)
 
-        print(masked_ids.device(), ids.device(), special_tokens_mask.device())
+            masked_ids = batch["masked_ids"]
+            ids = batch["ids"]
+            special_tokens_mask = batch["special_tokens_mask"]
 
-        state, loss = train_step(state, masked_ids, ids, special_tokens_mask)
+            masked_ids = jnp.array(masked_ids, dtype=int)
+            ids = jnp.array(ids, dtype=int)
+            special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
 
-        print(f"step {step}: loss {loss}")
+            state, loss = train_step(state, masked_ids, ids, special_tokens_mask)
 
-        recent_loss += loss
-        step += 1
+            end_time = datetime.now()
 
-        if (step - start_step) % step_report == 0:
-            avg_loss = recent_loss / step_report
-            print(f"Step {step}; Average loss over {step_report} steps: {avg_loss:0.4f}")
-            recent_loss = 0.0
+            elapsed_time = end_time - start_time
+
+            print(f"step {step}: loss {loss} ({format_timedelta(elapsed_time)})")
+
+            recent_loss += loss
+            step += 1
+            pbar.update(1)
+
+            if (step - start_step) % step_report == 0:
+                avg_loss = recent_loss / step_report
+                print(f"\nAverage loss over {step_report} steps: {avg_loss:0.4f}")
+                recent_loss = 0.0
 
     return state
 
@@ -230,8 +256,8 @@ def main(*, model_name):
     # SETUP HYPERPARAMETERS
     # =====================
 
-    input_seq_len = 1024
-    batch_size = 4
+    input_seq_len = 256
+    batch_size = 1
     learning_rate = 1e-3
 
 
@@ -243,7 +269,8 @@ def main(*, model_name):
     dataset = ESM2MaskedResidueDataset(
         hdf5_file_path,
         tokenizer=esm_tokenizer.protein_tokenizer(input_seq_len),
-        seed=100
+        seed=100,
+        seq_len=input_seq_len
     )
 
     dataloader = DataLoader(
@@ -280,11 +307,11 @@ def main(*, model_name):
 
     mesh = get_1d_gpu_mesh()
 
-    state = create_train_state(rng, esm, learning_rate, (batch_size, input_seq_len), mesh=None)
+    state = create_train_state(rng, esm, learning_rate, (batch_size, input_seq_len), mesh=mesh)
 
-    print("Created train state:")
+    print("Created train state.")
 
-    final_state = train(state, dataloader, end_step=10, step_report=5)
+    final_state = train(state, dataloader, end_step=50, step_report=5)
 
 
 if __name__ == "__main__":
@@ -292,16 +319,16 @@ if __name__ == "__main__":
     #     model_name="esm2_t48_15B_UR50D"
     # )
 
-    # main(
-    #     model_name="esm2_t36_3B_UR50D"
-    # )
-
     main(
-        model_name="esm2_t30_150M_UR50D"
+        model_name="esm2_t36_3B_UR50D"
     )
 
     # main(
     #     model_name="esm2_t33_650M_UR50D"
+    # )
+
+    # main(
+    #     model_name="esm2_t30_150M_UR50D"
     # )
 
     # main(
