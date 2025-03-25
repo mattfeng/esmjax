@@ -26,6 +26,8 @@ from esmjax.data import ESM2MaskedResidueDataset
 
 from torch.utils.data import DataLoader
 
+import pynvml
+
 
 ModelConfig = namedtuple(
     "ModelConfig",
@@ -41,6 +43,9 @@ MODEL_CONFIGS = {
         ),
     "esm2_t30_150M_UR50D": ModelConfig(
         num_layers=30, embed_dim=640, num_heads=20
+        ),
+    "esm2_t24_wide_2B_UR50D": ModelConfig(
+        num_layers=24, embed_dim=2560, num_heads=40
         ),
     "esm2_t33_650M_UR50D": ModelConfig(
         num_layers=33, embed_dim=1280, num_heads=20
@@ -84,7 +89,7 @@ def human_readable_bytes(num_bytes):
 
 
 def auto_shard_params(params, mesh):
-    """Automatically shards model parameters based on size & shape."""
+    """Automatically shards model parameters based on the largest tensor dimension."""
 
     def shard_rule(x):
         if not isinstance(x, jnp.ndarray):
@@ -92,13 +97,26 @@ def auto_shard_params(params, mesh):
                 raise ValueError("np.ndarrays found in parameters PyTree. They will not be sharded!")
             return x  # Skip non-JAX types
 
-        # Define a heuristic: If dimension is large, partition it across devices
-        shard_spec = P("X") if x.shape[0] >= 1024 and x.shape[0] % 2 == 0 else P()  # Large tensors get sharded
+        # For scalars (0-dimensional arrays), there's nothing to shard.
+        if x.ndim == 0:
+            return x
 
-        # Apply NamedSharding
-        return jax.device_put(x, NamedSharding(mesh, shard_spec))
+        # Find the axis with the largest size
+        largest_axis = max(range(x.ndim), key=lambda i: x.shape[i])
+        largest_dim = x.shape[largest_axis]
 
-    # Apply sharding rules recursively to all parameters
+        # Define a heuristic: if the largest dimension meets criteria, shard along that axis.
+        # (For example, if the largest dimension is at least 1024 and is even.)
+        if largest_dim >= 1024 and largest_dim % 2 == 0:
+            # Create a PartitionSpec: mark the largest axis as sharded ("X") and others unsharded.
+            spec = P(*tuple("X" if i == largest_axis else None for i in range(x.ndim)))
+        else:
+            # Otherwise, no sharding is applied.
+            spec = P()
+
+        # Apply NamedSharding using the computed PartitionSpec.
+        return jax.device_put(x, NamedSharding(mesh, spec))
+
     print("Sharding parameters...")
     sharded_params = jax.tree_util.tree_map(shard_rule, params)
     print("Parameters sharded.")
@@ -189,6 +207,8 @@ def loss_fn(state, params, masked_ids, ids, special_tokens_mask):
 
 @jax.jit
 def train_step(state, masked_ids, ids, special_tokens_mask):
+    print("compiling train_step...")
+
     loss, grads = jax.value_and_grad(loss_fn, argnums=1)(
         state,
         state.params,
@@ -201,6 +221,20 @@ def train_step(state, masked_ids, ids, special_tokens_mask):
     return state, loss
 
 
+def get_memory_stats():
+    stats = []
+
+    for i in range(pynvml.nvmlDeviceGetCount()):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total = human_readable_bytes(mem_info.total)
+        used = human_readable_bytes(mem_info.used)
+        stat_str =  f"device {i}: {used}/{total}"
+        stats.append(stat_str)
+
+    return " | ".join(stats)
+
+
 def train(
     state: train_state.TrainState,
     dataloader: DataLoader,
@@ -209,6 +243,7 @@ def train(
     start_step: int = 0,
     end_step: int,
 ):
+
     dataloader_it = iter(cycle(dataloader))
 
     recent_loss = 0.0
@@ -230,13 +265,15 @@ def train(
             ids = jnp.array(ids, dtype=int)
             special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
 
+            # print_param_dtypes(state.params)
+
             state, loss = train_step(state, masked_ids, ids, special_tokens_mask)
 
             end_time = datetime.now()
 
             elapsed_time = end_time - start_time
 
-            print(f"step {step}: loss {loss} ({format_timedelta(elapsed_time)})")
+            print(f"step {step}: loss {loss} ({format_timedelta(elapsed_time)}) ({get_memory_stats()})")
 
             recent_loss += loss
             step += 1
@@ -256,9 +293,11 @@ def main(*, model_name):
     # SETUP HYPERPARAMETERS
     # =====================
 
-    input_seq_len = 256
-    batch_size = 1
+    input_seq_len = 1024
+    batch_size = 4
     learning_rate = 1e-3
+    model_dtype = jnp.bfloat16
+    # model_dtype = jnp.float32
 
 
     # SETUP DATASET
@@ -289,16 +328,23 @@ def main(*, model_name):
     cfg = MODEL_CONFIGS[model_name]
 
     esm = models.ESM2MLM(
-        nn.Embed(dataset.tokenizer.get_vocab_size(), cfg.embed_dim),
+        nn.Embed(
+            dataset.tokenizer.get_vocab_size(),
+            cfg.embed_dim,
+            param_dtype=model_dtype,
+            dtype=model_dtype
+            ),
         functools.partial(
             models.EncoderLayer,
             cfg.num_heads,
             cfg.embed_dim,
             cfg.embed_dim * 4
             ),
-        cfg.num_layers
+        cfg.num_layers,
+        dtype=model_dtype
         )
-    print(esm)
+
+    print(esm.tabulate(rng, jnp.array([[0, 1, 2]], dtype=int)))
 
     # SETUP TRAINING
     # ==============
@@ -314,13 +360,20 @@ def main(*, model_name):
     final_state = train(state, dataloader, end_step=50, step_report=5)
 
 
+
 if __name__ == "__main__":
+    pynvml.nvmlInit()
+
     # main(
     #     model_name="esm2_t48_15B_UR50D"
     # )
 
+    # main(
+    #     model_name="esm2_t36_3B_UR50D"
+    # )
+
     main(
-        model_name="esm2_t36_3B_UR50D"
+        model_name="esm2_t24_wide_2B_UR50D"
     )
 
     # main(
@@ -334,3 +387,5 @@ if __name__ == "__main__":
     # main(
     #     model_name="esm2_t12_35M_UR50D"
     # )
+
+    pynvml.nvmlShutdown()

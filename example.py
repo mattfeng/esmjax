@@ -16,6 +16,30 @@ from esmjax.modules import models
 def convert_params_to_bfloat16(params):
     return jax.tree_util.tree_map(lambda x: jax.device_put(jnp.asarray(x, dtype=jnp.bfloat16), jax.devices("cpu")[0]) if jnp.issubdtype(x.dtype, jnp.floating) else x, params)
 
+
+def get_esm2_model(cfg, lm_head: bool = False):
+    """Given original PyTorch state cfg dict, return JAX model using the spec.
+    Args:
+        cfg (dict): Original PyTorch state cfg dict
+        lm_head (bool, optional): If True, returns model with the language model
+        head on top (will compute logits instead of embeddings). Defaults to False.
+    Returns:
+        Tuple[nn.Module, FrozenDict]: First value is the ESM2 nn.Module, second
+            is the sharding spec for all params where a constraint is specified.
+    """
+    num_layers = cfg["model"].encoder_layers
+    embed_dim = cfg["model"].encoder_embed_dim
+    num_heads = cfg["model"].encoder_attention_heads
+
+    embedding = nn.Embed(33, embed_dim)
+    # num_heads = 40
+    # embed_dim = 5120
+    block_fn = functools.partial(EncoderLayer, num_heads, embed_dim, embed_dim * 4)
+    esm_fn = ESM2MLM if lm_head else ESM2
+    esm2 = esm_fn(embedding, block_fn, num_layers)
+
+    return esm2
+
 # MODEL_NAME = "esm2_t6_8M_UR50D"
 # MODEL_NAME = "esm2_t12_35M_UR50D"
 # MODEL_NAME = "esm2_t30_150M_UR50D"

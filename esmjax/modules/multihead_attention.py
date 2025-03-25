@@ -1,5 +1,4 @@
 import functools
-
 from typing import Callable, Optional
 
 import einops
@@ -10,7 +9,6 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
 from . import rotary_embedding
-
 
 class RoPEMultiHeadDotProductAttention(nn.Module):
     """Implementation of multi-head dot product attention, with
@@ -30,6 +28,8 @@ class RoPEMultiHeadDotProductAttention(nn.Module):
     dense_gen: Callable[[], nn.Module] = nn.DenseGeneral
     qkv_features: int = None
     out_features: int = None
+    dtype: jnp.dtype = jnp.bfloat16
+    # dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(
@@ -51,9 +51,10 @@ class RoPEMultiHeadDotProductAttention(nn.Module):
         # Create layer_fn for query, key and value.
         qkv_dense = functools.partial(
             self.dense_gen,
-            features=(self.num_heads, head_dim)
+            features=(self.num_heads, head_dim),
+            param_dtype=self.dtype,
+            dtype=self.dtype
         )
-
 
         # project inputs_q to multi-headed q/k/v
         # dimensions are then [batch..., length, n_heads, n_features_per_head]
@@ -70,7 +71,13 @@ class RoPEMultiHeadDotProductAttention(nn.Module):
         # Pt. 3: Compute the attention weights and store them with sow.
         if mask is not None:
             mask = einops.rearrange(mask, "batch q_len kv_len -> batch () q_len kv_len")
-        attn_weights = nn.attention.dot_product_attention_weights(query, key, mask=mask)
+
+        attn_weights = nn.attention.dot_product_attention_weights(
+            query,
+            key,
+            mask=mask,
+            dtype=self.dtype
+            )
         self.sow("intermediates", "attn_weights", attn_weights)
         # modified from https://github.com/google/flax/blob/main/flax/linen/attention.py#L186
         x = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
@@ -79,7 +86,9 @@ class RoPEMultiHeadDotProductAttention(nn.Module):
         out = self.dense_gen(
             features=features,
             axis=(-2, -1),
-            name="out_proj"
+            name="out_proj",
+            param_dtype=self.dtype,
+            dtype=self.dtype
         )(x)
 
         return out

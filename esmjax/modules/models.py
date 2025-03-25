@@ -1,10 +1,8 @@
-import functools
 from typing import Callable, Optional
 
 import einops
 
 import flax.linen as nn
-import jax
 import jax.numpy as jnp
 
 from jaxtyping import Array, Bool, Float, Integer
@@ -25,6 +23,8 @@ class EncoderLayer(nn.Module):
     num_heads: int
     embed_dim: int
     ffn_embed_dim: int
+    dtype: jnp.dtype = jnp.bfloat16
+    # dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(
@@ -42,6 +42,7 @@ class EncoderLayer(nn.Module):
             qkv_features=self.embed_dim,
             out_features=self.embed_dim,
             name="self_attn",
+            dtype=self.dtype
         )(x, mask=mask)
         x = residual + x
 
@@ -53,6 +54,8 @@ class EncoderLayer(nn.Module):
         x = nn.Dense(
             self.ffn_embed_dim,
             name="fc1",
+            param_dtype=self.dtype,
+            dtype=self.dtype
         )(x)
         # Don't approximate gelu to avoid divergence with original PyTorch.
         x = nn.gelu(x, approximate=False)
@@ -61,6 +64,8 @@ class EncoderLayer(nn.Module):
         x = nn.Dense(
             self.embed_dim,
             name="fc2",
+            param_dtype=self.dtype,
+            dtype=self.dtype
         )(x)
         x = residual + x
 
@@ -82,6 +87,7 @@ class ESM2(nn.Module):
     num_layers: int
     pad_idx: int = 1
     mask_idx: int = 32
+    dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(
@@ -138,7 +144,12 @@ class ESM2MLM(ESM2):
         final_ffn_dim = self.embedding.features
         num_embeddings = self.embedding.num_embeddings
 
-        x = nn.Dense(final_ffn_dim, name="lm_head_fc")(embeds)
+        x = nn.Dense(
+            final_ffn_dim,
+            name="lm_head_fc",
+            param_dtype=self.dtype,
+            dtype=self.dtype
+        )(embeds)
         x = nn.gelu(x, approximate=False)
         x = nn.LayerNorm(epsilon=1e-5, name="lm_head_layer_norm")(x)
 
@@ -146,27 +157,3 @@ class ESM2MLM(ESM2):
         x = self.embedding.attend(x) + bias
 
         return x
-
-
-def get_esm2_model(cfg, lm_head: bool = False):
-    """Given original PyTorch state cfg dict, return JAX model using the spec.
-    Args:
-        cfg (dict): Original PyTorch state cfg dict
-        lm_head (bool, optional): If True, returns model with the language model
-        head on top (will compute logits instead of embeddings). Defaults to False.
-    Returns:
-        Tuple[nn.Module, FrozenDict]: First value is the ESM2 nn.Module, second
-            is the sharding spec for all params where a constraint is specified.
-    """
-    num_layers = cfg["model"].encoder_layers
-    embed_dim = cfg["model"].encoder_embed_dim
-    num_heads = cfg["model"].encoder_attention_heads
-
-    embedding = nn.Embed(33, embed_dim)
-    # num_heads = 40
-    # embed_dim = 5120
-    block_fn = functools.partial(EncoderLayer, num_heads, embed_dim, embed_dim * 4)
-    esm_fn = ESM2MLM if lm_head else ESM2
-    esm2 = esm_fn(embedding, block_fn, num_layers)
-
-    return esm2
