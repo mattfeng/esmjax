@@ -54,14 +54,17 @@ class ESM2MaskedResidueDataset(Dataset):
 
     def _mask(self, seq: Tuple[str]) -> Tuple[str]:
         ret = []
+        is_masked = []
 
         for c in seq:
             if self.rng.random() < 0.15:
                 ret.append("<mask>")
+                is_masked.append(1)
             else:
                 ret.append(c)
+                is_masked.append(0)
 
-        return tuple(ret)
+        return tuple(ret), tuple(is_masked)
 
     def _tokenize(self, seq: Tuple[str]) -> Tuple[int]:
         # pad and convert to int
@@ -80,11 +83,12 @@ class ESM2MaskedResidueDataset(Dataset):
         seq = tuple(["<sos>", *[chr(i) for i in seq], "<eos>"])
 
         seq = self._random_crop(seq)
-        masked_seq = self._mask(seq)
+        masked_seq, mask = self._mask(seq)
         seq = self._tokenize(seq)
         masked_seq = self._tokenize(masked_seq)
 
         return {
+            "mask": mask + (0,) * (self.seq_len - len(mask)),
             "masked_ids": masked_seq.ids,
             "ids": seq.ids,
             "special_tokens_mask": seq.special_tokens_mask
@@ -92,6 +96,7 @@ class ESM2MaskedResidueDataset(Dataset):
 
     def collate_fn(self, batch):
         return {
+            "mask": np.stack([item["mask"] for item in batch]),
             "masked_ids": np.stack([item["masked_ids"] for item in batch]),
             "ids": np.stack([item["ids"] for item in batch]),
             "special_tokens_mask": np.stack([item["special_tokens_mask"] for item in batch]),

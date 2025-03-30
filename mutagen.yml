@@ -1,18 +1,20 @@
 sync:
   defaults:
+    maxStagingFileSize: "50 MB"
     mode: two-way-resolved
     flushOnCreate: true
     ignore:
       vcs: true
       paths:
-        - "mutagen.yml"
-        - "mutagen.yml.lock"
+        # - "mutagen.yml"
+        # - "mutagen.yml.lock"
         - "logs/"
         - "wandb/"
         - "*.pkl"
         - "*.msgpack"
         - "*.h5"
         - "data/"
+        - "*.prof"
 
   engaging:
     alpha: .

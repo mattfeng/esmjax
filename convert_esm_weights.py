@@ -15,9 +15,9 @@ def convert_params_to_bfloat16(params):
 # MODEL_NAME = "esm2_t6_8M_UR50D"
 # MODEL_NAME = "esm2_t12_35M_UR50D"
 # MODEL_NAME = "esm2_t30_150M_UR50D"
-# MODEL_NAME = "esm2_t33_650M_UR50D"
+MODEL_NAME = "esm2_t33_650M_UR50D"
 # MODEL_NAME = "esm2_t36_3B_UR50D"
-MODEL_NAME = "esm2_t48_15B_UR50D"
+# MODEL_NAME = "esm2_t48_15B_UR50D"
 
 print(f"converting model {MODEL_NAME}")
 # Load in the original PyTorch state; will download if first time.

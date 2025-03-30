@@ -23,8 +23,7 @@ class EncoderLayer(nn.Module):
     num_heads: int
     embed_dim: int
     ffn_embed_dim: int
-    dtype: jnp.dtype = jnp.bfloat16
-    # dtype: jnp.dtype = jnp.float32
+    dtype: jnp.dtype
 
     @nn.compact
     def __call__(
@@ -85,9 +84,9 @@ class ESM2(nn.Module):
     embedding: nn.Module
     block_gen: Callable[[], nn.Module]
     num_layers: int
+    dtype: jnp.dtype
     pad_idx: int = 1
     mask_idx: int = 32
-    dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(

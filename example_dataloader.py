@@ -114,20 +114,22 @@ print(esm_params)
 # p53_seq = "MEEPQSDPSVEPPLSQETFSDLWKLLPENNVLSPLPSQAMDDLMLSPDDIEQWFTEDPGPDEAPRMPEAAPPVAPAPAAPTPAAPAPAPSWPLSSSVPSQKTYQGSYGFRLGFLHSGTAKSVTCTYSPALNKMFCQLAKTCPVQLWVDSTPPPGTRVRAMAIYKQSQHMTEVVRRCPHHERCSDSDGLAPPQHLIRVEGNLRVEYLDDRNTFRHSVVVPYEPPEVGSDCTTIHYNYMCNSSCMGGMNRRPILTIITLEDSSGNLLGRNSFEVRVCACPGRDRRTEEENLRKKGEPHHELPPGSTKRALPNNTSSSPQPKKKPLDGEYFTLQIRGRERFEMFRELNEALELKDAQAGKEPGGSRAHSSHLKSKKGQSTSRHKKLMFKTEGPDSD"
 
 
-def diff(tokens1, tokens2):
+def diff(tokens1, tokens2, masked=None):
     if len(tokens1) != len(tokens2):
         raise ValueError("Both lists must have the same number of tokens.")
     
     highlighted = []
     
     # Compare tokens from both lists
-    for token1, token2 in zip(tokens1, tokens2):
+    for i, (token1, token2) in enumerate(zip(tokens1, tokens2)):
+        attrs = ["underline"] if (masked and masked[i]) else None
+
         if token1 != token2:
             # Highlight both tokens using termcolor.colored
-            highlighted.append(colored(token1, "red") + "/" + colored(token2, "dark_grey"))
+            highlighted.append(colored(token1, "red", attrs=attrs) + "/" + colored(token2, "dark_grey", attrs=attrs))
         else:
             # If tokens are identical, add them without modification
-            highlighted.append(token1)
+            highlighted.append(colored(token1, attrs=attrs))
     
     return " ".join(highlighted)
 
@@ -143,42 +145,50 @@ def loss_fn(logits, labels, special_tokens_mask):
     return loss
 
 
-inputs = [
-    "<sos><mask>ALWMRLLPLLALLALWGPDPAAAFVNQHLCGSHLVEALYLVCGERGFFYTPKTRREAEDLQVGQVELGGGPGAGSLQPLALEGSLQKRGIVEQCCTSICSLYQLENYCN<eos>", # insulin
-]
+hdf5_file_path = "/home/gridsan/mattfeng/datasets/esm2_pretrain_nemo2_fulldata_v1.0/full_esm2_pretrain.h5"
 
-labels = [
-    "<sos>MALWMRLLPLLALLALWGPDPAAAFVNQHLCGSHLVEALYLVCGERGFFYTPKTRREAEDLQVGQVELGGGPGAGSLQPLALEGSLQKRGIVEQCCTSICSLYQLENYCN<eos>", # insulin
-]
+tokenizer = esm_tokenizer.protein_tokenizer(512)
 
-tokenizer = esm_tokenizer.protein_tokenizer(pad_length=256)
-tokens = [x.ids for x in tokenizer.encode_batch(inputs)]
-special_tokens_mask = jnp.array([x.special_tokens_mask for x in tokenizer.encode_batch(labels)], dtype=bool)
-label_tokens = jnp.array([x.ids for x in tokenizer.encode_batch(labels)], dtype=int)
+dataset = ESM2MaskedResidueDataset(
+    hdf5_file_path,
+    tokenizer=tokenizer,
+    seed=100,
+    seq_len=512
+)
 
-print("tokens:", tokens)
+dataloader = DataLoader(
+    dataset,
+    batch_size=1,
+    shuffle=True,
+    drop_last=False,
+    persistent_workers=True,
+    num_workers=4,
+    collate_fn=dataset.collate_fn
+)
 
-batch = np.array(tokens)
+dataloader_it = iter(dataloader)
 
-print("Generated batch")
+batch = next(dataloader_it)
+print(batch)
 
 # inference
 apply_fn = jax.jit(esm.apply)
-logits = apply_fn(esm_params, batch)
+logits = apply_fn(esm_params, batch["masked_ids"])
 
 output_probs = jax.nn.softmax(logits, axis=-1)
 output_tokens = jnp.argmax(output_probs, axis=-1)
 
 outputs_decoded = tokenizer.decode_batch(output_tokens, skip_special_tokens=False)
-labels_decoded = tokenizer.decode_batch(label_tokens, skip_special_tokens=False)
+labels_decoded = tokenizer.decode_batch(batch["ids"], skip_special_tokens=False)
 
 print(outputs_decoded)
 
-for output, label in zip(outputs_decoded, labels_decoded):
+for output, label, mask in zip(outputs_decoded, labels_decoded, batch["mask"]):
     output = output.split(" ")
     label = label.split(" ")
+    mask = mask.tolist()
 
-    print(diff(output, label))
+    print(diff(output, label, masked=mask))
 
-loss = loss_fn(logits, label_tokens, special_tokens_mask)
+loss = loss_fn(logits, batch["ids"], batch["special_tokens_mask"])
 print(loss)

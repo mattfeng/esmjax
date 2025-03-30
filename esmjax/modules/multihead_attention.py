@@ -25,11 +25,10 @@ class RoPEMultiHeadDotProductAttention(nn.Module):
     """
 
     num_heads: int
+    dtype: jnp.dtype
     dense_gen: Callable[[], nn.Module] = nn.DenseGeneral
     qkv_features: int = None
     out_features: int = None
-    dtype: jnp.dtype = jnp.bfloat16
-    # dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(

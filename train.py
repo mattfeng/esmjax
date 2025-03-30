@@ -3,8 +3,10 @@ import functools
 from collections import namedtuple
 from typing import Tuple
 from datetime import timedelta, datetime
+from collections import deque
+import time
 
-import tqdm
+from termcolor import colored
 
 import numpy as np
 
@@ -41,11 +43,17 @@ MODEL_CONFIGS = {
     "esm2_t12_35M_UR50D": ModelConfig(
         num_layers=12, embed_dim=480, num_heads=20
         ),
-    "esm2_t30_150M_UR50D": ModelConfig(
-        num_layers=30, embed_dim=640, num_heads=20
+    "esm2_t18_medium_800M_UR50D": ModelConfig(
+        num_layers=18, embed_dim=1920, num_heads=30
+        ),
+    "esm2_t22_medium_1B_UR50D": ModelConfig(
+        num_layers=22, embed_dim=1920, num_heads=30
         ),
     "esm2_t24_wide_2B_UR50D": ModelConfig(
         num_layers=24, embed_dim=2560, num_heads=40
+        ),
+    "esm2_t30_150M_UR50D": ModelConfig(
+        num_layers=30, embed_dim=640, num_heads=20
         ),
     "esm2_t33_650M_UR50D": ModelConfig(
         num_layers=33, embed_dim=1280, num_heads=20
@@ -58,20 +66,22 @@ MODEL_CONFIGS = {
         ),
 }
 
+
 def format_timedelta(td: timedelta) -> str:
-    # Calculate total seconds from the timedelta
-    total_seconds = int(td.total_seconds())
+    # Extract days, seconds, and microseconds from the timedelta
+    days = td.days
+    total_seconds = td.seconds
+    microseconds = td.microseconds
 
-    # Compute days, hours, minutes, and seconds
-    days, remainder = divmod(total_seconds, 86400)  # 86400 seconds in a day
-    hours, remainder = divmod(remainder, 3600)        # 3600 seconds in an hour
-    minutes, seconds = divmod(remainder, 60)          # 60 seconds in a minute
+    # Calculate hours, minutes, and seconds from total_seconds
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
 
-    # Format string depending on whether there are days or not
+    # Format with always showing six digits for microseconds
     if days > 0:
-        return f"{days}d {hours:02}h:{minutes:02}m:{seconds:02}s"
+        return f"{days}d:{hours:02}h:{minutes:02}m:{seconds:02}.{microseconds:03}s"
     else:
-        return f"{hours:02}h:{minutes:02}m:{seconds:02}s"
+        return f"{hours:02}h {minutes:02}m {seconds:02}.{microseconds:03}s"
 
 
 def human_readable_bytes(num_bytes):
@@ -86,6 +96,24 @@ def human_readable_bytes(num_bytes):
         num_bytes /= 1024
 
     return f"{num_bytes:.2f} YB"
+
+
+def diff(tokens1, tokens2):
+    if len(tokens1) != len(tokens2):
+        raise ValueError("Both lists must have the same number of tokens.")
+    
+    highlighted = []
+    
+    # Compare tokens from both lists
+    for token1, token2 in zip(tokens1, tokens2):
+        if token1 != token2:
+            # Highlight both tokens using termcolor.colored
+            highlighted.append(colored(f"{token1}/{token2}", 'red'))
+        else:
+            # If tokens are identical, add them without modification
+            highlighted.append(token1)
+    
+    return " ".join(highlighted)
 
 
 def auto_shard_params(params, mesh):
@@ -134,7 +162,7 @@ def get_1d_gpu_mesh():
     return mesh
 
 
-def load_pretrained_params(params_file):
+def load_pretrained_params(params_file: str):
     """Load pretrained parameters.
 
     flax_params/{model_name}.bfloat16.msgpack
@@ -164,20 +192,25 @@ def cycle(dataloader: DataLoader):
 def create_train_state(
     rng: jax.random.PRNGKey,
     model: nn.Module,
-    learning_rate: float,
+    optim_params,
     input_shape: Tuple[int],
     *,
-    params=None,
+    grad_acc_steps: int = 1,
+    params_file=None,
     mesh=None
 ):
     """Create a training state to hold model parameters and the optimizer.
     """
 
-    if params is None:
+    if params_file is None:
         # hack to force initialization of params on CPU
         # cpu_device = jax.devices("cpu")[0]
         # params = jax.jit(model.init, device=cpu_device)(rng, jnp.ones(input_shape, dtype=int))["params"]
+        print("Initializing model parameters...")
         params = model.init(rng, jnp.empty(input_shape, dtype=int))["params"]
+    else:
+        print(f"Using pretrained parameters from {params_file}...")
+        params = load_pretrained_params(params_file)["params"]
 
     # Convert param dtype to bfloat16
     # params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16) if isinstance(x, jnp.ndarray) else x, params)
@@ -185,11 +218,17 @@ def create_train_state(
     # move params to desired accelerator
     # params = jax.tree_util.tree_map(lambda x: jax.device_put(x), params)
 
-    # TODO: autoshard
     if mesh is not None:
         params = auto_shard_params(params, mesh)
 
-    tx = optax.adam(learning_rate)
+    # TODO: try using gradient accumulation
+    # gradient acc uses additional memory even when
+    # every_k_schedule = 1
+    if grad_acc_steps > 1:
+        tx = optax.MultiSteps(optax.adam(**optim_params), every_k_schedule=grad_acc_steps)
+    else:
+        tx = optax.adam(**optim_params)
+
     state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
     return state
@@ -207,7 +246,7 @@ def loss_fn(state, params, masked_ids, ids, special_tokens_mask):
 
 @jax.jit
 def train_step(state, masked_ids, ids, special_tokens_mask):
-    print("compiling train_step...")
+    print("Compiling train_step...")
 
     loss, grads = jax.value_and_grad(loss_fn, argnums=1)(
         state,
@@ -239,66 +278,100 @@ def train(
     state: train_state.TrainState,
     dataloader: DataLoader,
     *,
-    step_report: int = 100,
+    avg_loss_range: int = 10,
     start_step: int = 0,
     end_step: int,
 ):
 
     dataloader_it = iter(cycle(dataloader))
 
-    recent_loss = 0.0
+    recent_losses = deque()
 
     step = start_step
 
-    with tqdm.tqdm(total=end_step - start_step) as pbar:
-        while step < end_step:
-            pbar.set_description(f"Step {step} of {start_step}->{end_step}")
+    # precompile train_step
+    batch = next(dataloader_it)
 
-            start_time = datetime.now()
-            batch = next(dataloader_it)
+    masked_ids = batch["masked_ids"]
+    ids = batch["ids"]
+    special_tokens_mask = batch["special_tokens_mask"]
 
-            masked_ids = batch["masked_ids"]
-            ids = batch["ids"]
-            special_tokens_mask = batch["special_tokens_mask"]
+    # TODO: dataloader should move arrays onto device (pipeline)
+    masked_ids = jnp.array(masked_ids, dtype=int)
+    ids = jnp.array(ids, dtype=int)
+    special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
 
-            masked_ids = jnp.array(masked_ids, dtype=int)
-            ids = jnp.array(ids, dtype=int)
-            special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
+    start_time = datetime.now()
+    jax.block_until_ready(train_step(state, masked_ids, ids, special_tokens_mask))
+    end_time = datetime.now()
 
-            # print_param_dtypes(state.params)
+    print(f"Compilation time: {format_timedelta(end_time - start_time)}")
 
-            state, loss = train_step(state, masked_ids, ids, special_tokens_mask)
+    while step < end_step:
+        batch = next(dataloader_it)
 
-            end_time = datetime.now()
+        masked_ids = batch["masked_ids"]
+        ids = batch["ids"]
+        special_tokens_mask = batch["special_tokens_mask"]
 
-            elapsed_time = end_time - start_time
+        masked_ids = jnp.array(masked_ids, dtype=int)
+        ids = jnp.array(ids, dtype=int)
+        special_tokens_mask = jnp.array(special_tokens_mask, dtype=bool)
 
-            print(f"step {step}: loss {loss} ({format_timedelta(elapsed_time)}) ({get_memory_stats()})")
+        start_time = datetime.now()
+        state, loss = jax.block_until_ready(train_step(state, masked_ids, ids, special_tokens_mask))
+        end_time = datetime.now()
 
-            recent_loss += loss
-            step += 1
-            pbar.update(1)
+        elapsed_time = end_time - start_time
 
-            if (step - start_step) % step_report == 0:
-                avg_loss = recent_loss / step_report
-                print(f"\nAverage loss over {step_report} steps: {avg_loss:0.4f}")
-                recent_loss = 0.0
+        loss = loss.item()
+
+        print(loss)
+        print(type(loss))
+        # print(loss.device())
+
+        avg_loss = f"{sum(recent_losses) / avg_loss_range:0.6f}"
+
+        print(f"step {colored(step, 'red')}: loss {loss:0.6f} avg_loss ({avg_loss_range} steps): {colored(avg_loss, 'cyan')} ({format_timedelta(elapsed_time)}) ({get_memory_stats()})")
+
+        recent_losses.append(loss)
+
+        if len(recent_losses) > avg_loss_range:
+            recent_losses.popleft()
+
+        # jax.profiler.save_device_memory_profile(f"memory_{step}.prof")
+
+        step += 1
 
     return state
 
 
 def main(*, model_name):
+    print(f"Model: {model_name}")
+
     rng = jax.random.PRNGKey(0)
 
     # SETUP HYPERPARAMETERS
     # =====================
 
-    input_seq_len = 1024
+    input_seq_len = 256
     batch_size = 4
-    learning_rate = 1e-3
+    optim_params = {
+        # "learning_rate": 1e-4,
+        "learning_rate": 0,
+        "b1": 0.9,
+        "b2": 0.98
+    }
+    grad_acc_steps = 200
+    # grad_acc_steps = 1
     model_dtype = jnp.bfloat16
     # model_dtype = jnp.float32
 
+    mesh = get_1d_gpu_mesh()
+    # mesh = None
+
+    params_file = "./flax_params/esm2_t33_650M_UR50D.bfloat16.msgpack"
+    # params = None
 
     # SETUP DATASET
     # =============
@@ -318,7 +391,7 @@ def main(*, model_name):
         shuffle=True,
         drop_last=False,
         persistent_workers=True,
-        num_workers=1,
+        num_workers=4,
         collate_fn=dataset.collate_fn
     )
 
@@ -338,10 +411,11 @@ def main(*, model_name):
             models.EncoderLayer,
             cfg.num_heads,
             cfg.embed_dim,
-            cfg.embed_dim * 4
+            cfg.embed_dim * 4,
+            model_dtype
             ),
         cfg.num_layers,
-        dtype=model_dtype
+        model_dtype
         )
 
     print(esm.tabulate(rng, jnp.array([[0, 1, 2]], dtype=int)))
@@ -351,13 +425,24 @@ def main(*, model_name):
 
     print("Creating train state...")
 
-    mesh = get_1d_gpu_mesh()
-
-    state = create_train_state(rng, esm, learning_rate, (batch_size, input_seq_len), mesh=mesh)
+    state = create_train_state(
+        rng,
+        esm,
+        optim_params,
+        (batch_size, input_seq_len),
+        params_file=params_file,
+        grad_acc_steps=grad_acc_steps,
+        mesh=mesh
+    )
 
     print("Created train state.")
 
-    final_state = train(state, dataloader, end_step=50, step_report=5)
+    final_state = train(
+        state,
+        dataloader,
+        end_step=100000,
+        avg_loss_range=grad_acc_steps
+    )
 
 
 
@@ -373,12 +458,8 @@ if __name__ == "__main__":
     # )
 
     main(
-        model_name="esm2_t24_wide_2B_UR50D"
+        model_name="esm2_t33_650M_UR50D"
     )
-
-    # main(
-    #     model_name="esm2_t33_650M_UR50D"
-    # )
 
     # main(
     #     model_name="esm2_t30_150M_UR50D"
@@ -387,5 +468,20 @@ if __name__ == "__main__":
     # main(
     #     model_name="esm2_t12_35M_UR50D"
     # )
+
+    # ---
+
+    # main(
+    #     model_name="esm2_t18_medium_800M_UR50D"
+    # )
+
+    # main(
+    #     model_name="esm2_t22_medium_1B_UR50D"
+    # )
+
+    # main(
+    #     model_name="esm2_t24_wide_2B_UR50D"
+    # )
+
 
     pynvml.nvmlShutdown()

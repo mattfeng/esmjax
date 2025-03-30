@@ -11,6 +11,12 @@ It is adapted from [Irhum Shafkat's implementation of ESM-2 in JAX/Flax](https:/
     - `io.py`: Weight porting of all ESM-2 models (8M to 15B) to JAX from original PyTorch weights (from [irhum/esmjax](https://github.com/irhum/esmjax)).
     - `tokenizer.py`: A protein tokenizer matching the output of the original, but re-written with HuggingFace's `tokenizers` library (from [irhum/esmjax](https://github.com/irhum/esmjax)).
 
+## Scripts
+
+```bash
+python convert_esm_weights.py
+```
+
 ## Developer notes
 
 ### Numerical precision
