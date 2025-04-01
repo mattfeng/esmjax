@@ -1,7 +1,5 @@
 import functools
 
-from termcolor import colored
-
 import numpy as np
 
 from flax.core import frozen_dict
@@ -20,6 +18,7 @@ from torch.utils.data import DataLoader
 from esmjax import io, tokenizer as esm_tokenizer
 from esmjax.modules import models
 from esmjax.data import ESM2MaskedResidueDataset
+from esmjax.utils import diff
 
 
 def convert_params_to_bfloat16(params):
@@ -112,26 +111,6 @@ print(esm_params)
 # ---
 
 # p53_seq = "MEEPQSDPSVEPPLSQETFSDLWKLLPENNVLSPLPSQAMDDLMLSPDDIEQWFTEDPGPDEAPRMPEAAPPVAPAPAAPTPAAPAPAPSWPLSSSVPSQKTYQGSYGFRLGFLHSGTAKSVTCTYSPALNKMFCQLAKTCPVQLWVDSTPPPGTRVRAMAIYKQSQHMTEVVRRCPHHERCSDSDGLAPPQHLIRVEGNLRVEYLDDRNTFRHSVVVPYEPPEVGSDCTTIHYNYMCNSSCMGGMNRRPILTIITLEDSSGNLLGRNSFEVRVCACPGRDRRTEEENLRKKGEPHHELPPGSTKRALPNNTSSSPQPKKKPLDGEYFTLQIRGRERFEMFRELNEALELKDAQAGKEPGGSRAHSSHLKSKKGQSTSRHKKLMFKTEGPDSD"
-
-
-def diff(tokens1, tokens2, masked=None):
-    if len(tokens1) != len(tokens2):
-        raise ValueError("Both lists must have the same number of tokens.")
-    
-    highlighted = []
-    
-    # Compare tokens from both lists
-    for i, (token1, token2) in enumerate(zip(tokens1, tokens2)):
-        attrs = ["underline"] if (masked and masked[i]) else None
-
-        if token1 != token2:
-            # Highlight both tokens using termcolor.colored
-            highlighted.append(colored(token1, "red", attrs=attrs) + "/" + colored(token2, "dark_grey", attrs=attrs))
-        else:
-            # If tokens are identical, add them without modification
-            highlighted.append(colored(token1, attrs=attrs))
-    
-    return " ".join(highlighted)
 
 
 def loss_fn(logits, labels, special_tokens_mask):

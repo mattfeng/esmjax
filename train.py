@@ -6,6 +6,8 @@ from datetime import timedelta, datetime
 from collections import deque
 import time
 
+from jax_smi import initialise_tracking
+
 from termcolor import colored
 
 import numpy as np
@@ -25,6 +27,7 @@ import optax
 from esmjax import tokenizer as esm_tokenizer
 from esmjax.modules import models
 from esmjax.data import ESM2MaskedResidueDataset
+from esmjax.utils import diff
 
 from torch.utils.data import DataLoader
 
@@ -96,24 +99,6 @@ def human_readable_bytes(num_bytes):
         num_bytes /= 1024
 
     return f"{num_bytes:.2f} YB"
-
-
-def diff(tokens1, tokens2):
-    if len(tokens1) != len(tokens2):
-        raise ValueError("Both lists must have the same number of tokens.")
-    
-    highlighted = []
-    
-    # Compare tokens from both lists
-    for token1, token2 in zip(tokens1, tokens2):
-        if token1 != token2:
-            # Highlight both tokens using termcolor.colored
-            highlighted.append(colored(f"{token1}/{token2}", 'red'))
-        else:
-            # If tokens are identical, add them without modification
-            highlighted.append(token1)
-    
-    return " ".join(highlighted)
 
 
 def auto_shard_params(params, mesh):
@@ -339,6 +324,7 @@ def train(
         if len(recent_losses) > avg_loss_range:
             recent_losses.popleft()
 
+        time.sleep(1)
         # jax.profiler.save_device_memory_profile(f"memory_{step}.prof")
 
         step += 1
@@ -346,7 +332,13 @@ def train(
     return state
 
 
-def main(*, model_name):
+def main(
+    *,
+    model_name,
+    model_dtype,
+    mesh,
+    params_file=None
+):
     print(f"Model: {model_name}")
 
     rng = jax.random.PRNGKey(0)
@@ -364,13 +356,7 @@ def main(*, model_name):
     }
     grad_acc_steps = 200
     # grad_acc_steps = 1
-    model_dtype = jnp.bfloat16
-    # model_dtype = jnp.float32
 
-    mesh = get_1d_gpu_mesh()
-    # mesh = None
-
-    params_file = "./flax_params/esm2_t33_650M_UR50D.bfloat16.msgpack"
     # params = None
 
     # SETUP DATASET
@@ -447,6 +433,8 @@ def main(*, model_name):
 
 
 if __name__ == "__main__":
+    initialise_tracking()
+
     pynvml.nvmlInit()
 
     # main(
@@ -457,9 +445,9 @@ if __name__ == "__main__":
     #     model_name="esm2_t36_3B_UR50D"
     # )
 
-    main(
-        model_name="esm2_t33_650M_UR50D"
-    )
+    # main(
+    #     model_name="esm2_t33_650M_UR50D"
+    # )
 
     # main(
     #     model_name="esm2_t30_150M_UR50D"
@@ -483,5 +471,16 @@ if __name__ == "__main__":
     #     model_name="esm2_t24_wide_2B_UR50D"
     # )
 
+    # === OOM settings ===
+    # no mesh
+    # bfloat16
+    # !! answer: due to memory fragmentation !!
+
+    main(
+        model_name="esm2_t22_medium_1B_UR50D",
+        model_dtype = jnp.bfloat16,
+        mesh = None,
+    )
+    # params_file = "./flax_params/esm2_t33_650M_UR50D.bfloat16.msgpack"
 
     pynvml.nvmlShutdown()
